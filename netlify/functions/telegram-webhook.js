@@ -1,38 +1,72 @@
 // netlify/functions/telegram-webhook.js
+// Required env vars (set these exactly in Netlify site settings):
+// - TELEGRAM_BOT_TOKEN
+// - SUPABASE_URL
+// - SUPABASE_SERVICE_ROLE_KEY
+// - TELEGRAM_ADMIN_CHAT_ID   (optional, comma-separated list)
+
 // Handles /start mapping, callback approve/reject for payments (Supabase)
 const fetch = require('node-fetch');
 
-const SUPA_URL = process.env.SUPABASE_URL;
-const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const TELE_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const SUPA_URL = process.env.SUPABASE_URL || '';
+const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const TELE_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const ADMIN_CHAT = process.env.TELEGRAM_ADMIN_CHAT_ID || '';
 
+/** Simple helpers for Supabase REST calls */
 async function supaFetch(path) {
+  if (!SUPA_URL || !SUPA_KEY) {
+    console.warn('supaFetch called but SUPA_URL/SUPA_KEY missing');
+    return null;
+  }
   const url = `${SUPA_URL}${path}`;
   const res = await fetch(url, { headers: { 'apikey': SUPA_KEY, 'Authorization': `Bearer ${SUPA_KEY}` }});
-  return res.json();
+  const text = await res.text();
+  try { return JSON.parse(text); } catch(e){ return text; }
 }
 async function supaPatch(path, body) {
+  if (!SUPA_URL || !SUPA_KEY) {
+    console.warn('supaPatch called but SUPA_URL/SUPA_KEY missing');
+    return null;
+  }
   const url = `${SUPA_URL}${path}`;
   const res = await fetch(url, {
     method: 'PATCH',
     headers: { 'Content-Type':'application/json', 'apikey': SUPA_KEY, 'Authorization': `Bearer ${SUPA_KEY}`, 'Prefer':'return=representation' },
     body: JSON.stringify(body)
   });
-  return res.json();
+  const text = await res.text();
+  try { return JSON.parse(text); } catch(e){ return text; }
 }
+
+/** Telegram helpers with response logging */
 async function sendTelegram(chatId, text, extra={}) {
-  if (!TELE_TOKEN) return;
+  if (!TELE_TOKEN) {
+    console.error('sendTelegram: TELEGRAM_BOT_TOKEN not set; cannot send message');
+    return { ok:false, error: 'no-token' };
+  }
+  const payload = Object.assign({ chat_id: String(chatId), text, parse_mode: 'HTML' }, extra);
   try {
-    await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify(Object.assign({ chat_id: String(chatId), text, parse_mode: 'HTML' }, extra))
+      body: JSON.stringify(payload)
     });
-  } catch(e) { console.error('sendTelegram err', e); }
+    const data = await res.json();
+    if (!data || !data.ok) {
+      console.error('sendTelegram failed', data);
+    }
+    return data;
+  } catch(e) {
+    console.error('sendTelegram err', e);
+    return { ok:false, error: e.message || e };
+  }
 }
 async function answerCallback(cbId, text) {
-  if (!TELE_TOKEN) return;
+  if (!TELE_TOKEN) {
+    console.error('answerCallback: TELEGRAM_BOT_TOKEN not set; cannot answer callback');
+    return;
+  }
   try {
     await fetch(`https://api.telegram.org/bot${TELE_TOKEN}/answerCallbackQuery`, {
       method: 'POST',
@@ -42,20 +76,27 @@ async function answerCallback(cbId, text) {
   } catch(e) { console.error('answerCallback err', e); }
 }
 
+/** Main handler */
 exports.handler = async function(event) {
   try {
     const raw = event.body || '{}';
-    const body = raw ? JSON.parse(raw) : {};
+    let body = {};
+    try { body = raw ? JSON.parse(raw) : {}; } catch(e) {
+      console.error('Invalid JSON body', e, raw);
+      // respond 200 to avoid Telegram retries; log for debugging
+      return { statusCode:200, body: 'invalid-json' };
+    }
 
-    // Handle callback_query (approve/reject)
+    // CALLBACK_QUERY: approve / reject
     if (body.callback_query) {
       const cb = body.callback_query;
       const data = cb.data || '';
-      // Approve payment
+      console.log('callback_query received', { from: cb.from && cb.from.id, data });
+
+      // Approve
       if (data.startsWith('approve_pay:')) {
         const paymentId = data.split(':')[1];
         try {
-          // fetch payment record
           const payments = await supaFetch(`/rest/v1/payments?id=eq.${paymentId}&select=*`);
           const payment = Array.isArray(payments) && payments[0] ? payments[0] : null;
           if (!payment) {
@@ -63,7 +104,7 @@ exports.handler = async function(event) {
             return { statusCode:200, body: 'ok' };
           }
 
-          // Determine associated member id (try common fields)
+          // find member id
           let memberId = payment.member_id || payment.memberId || null;
           if (!memberId && payment.Notes) {
             try {
@@ -72,30 +113,26 @@ exports.handler = async function(event) {
             } catch(e){ /* ignore */ }
           }
 
-          if (!memberId) {
-            // fallback: try to find pending member for same TelegramChatId (if payment has TelegramChatId)
-            if (payment.TelegramChatId) {
-              const arr = await supaFetch(`/rest/v1/members?telegram_chat_id=eq.${encodeURIComponent(payment.TelegramChatId)}&status=eq.pending&select=*`);
-              if (Array.isArray(arr) && arr[0]) memberId = arr[0].id;
-            }
+          if (!memberId && payment.TelegramChatId) {
+            const arr = await supaFetch(`/rest/v1/members?telegram_chat_id=eq.${encodeURIComponent(payment.TelegramChatId)}&status=eq.pending&select=*`);
+            if (Array.isArray(arr) && arr[0]) memberId = arr[0].id;
           }
 
           if (!memberId) {
-            // We can't proceed activating a member without link
             await supaPatch(`/rest/v1/payments?id=eq.${paymentId}`, { Status: 'approved_without_member' });
             await answerCallback(cb.id, 'Approved (no member linked). Please link member manually.');
             return { statusCode:200, body: 'ok' };
           }
 
-          // 1) set member status -> active
+          // activate member
           await supaPatch(`/rest/v1/members?id=eq.${memberId}`, { status: 'active' });
 
-          // 2) update sponsor slot: fetch member to read sponsor_id and position
+          // update sponsor children
           const mres = await supaFetch(`/rest/v1/members?id=eq.${memberId}&select=*`);
           const member = Array.isArray(mres) && mres[0] ? mres[0] : null;
           if (member && member.sponsor_id && member.position) {
             const sponsorId = member.sponsor_id;
-            const pos = member.position.toLowerCase();
+            const pos = (member.position || '').toLowerCase();
             if (pos === 'left') {
               await supaPatch(`/rest/v1/members?id=eq.${sponsorId}`, { left_child_id: memberId });
             } else {
@@ -103,20 +140,21 @@ exports.handler = async function(event) {
             }
           }
 
-          // 3) mark payment approved
+          // mark payment approved
           await supaPatch(`/rest/v1/payments?id=eq.${paymentId}`, { Status: 'approved' });
 
-          // 4) notify user (member) via Telegram if present
+          // notify user if possible
           const userChat = member && member.telegram_chat_id ? member.telegram_chat_id : payment.TelegramChatId || null;
           if (userChat) {
             await sendTelegram(userChat, `✅ Aapki payment approve ho gayi. Aap ab active member ho. Welcome!`);
           }
 
           await answerCallback(cb.id, 'Approved ✅');
-          // notify admin group that approval done (optional)
+
+          // notify admin (optional)
           if (ADMIN_CHAT) {
             const adminFirst = (ADMIN_CHAT.indexOf(',')>-1) ? ADMIN_CHAT.split(',')[0].trim() : ADMIN_CHAT;
-            await sendTelegram(adminFirst, `Payment ${paymentId} approved by @${cb.from.username || cb.from.id}`);
+            await sendTelegram(adminFirst, `Payment ${paymentId} approved by @${cb.from && cb.from.username || cb.from && cb.from.id}`);
           }
 
           return { statusCode:200, body: 'ok' };
@@ -127,7 +165,7 @@ exports.handler = async function(event) {
         }
       }
 
-      // Reject payment
+      // Reject
       if (data.startsWith('reject_pay:')) {
         const paymentId = data.split(':')[1];
         try {
@@ -138,10 +176,9 @@ exports.handler = async function(event) {
             return { statusCode:200, body: 'ok' };
           }
 
-          // mark payment rejected
           await supaPatch(`/rest/v1/payments?id=eq.${paymentId}`, { Status: 'rejected' });
 
-          // if member linked, mark member rejected
+          // link member if exists
           let memberId = payment.member_id || payment.memberId || null;
           if (!memberId && payment.TelegramChatId) {
             const arr = await supaFetch(`/rest/v1/members?telegram_chat_id=eq.${encodeURIComponent(payment.TelegramChatId)}&status=eq.pending&select=*`);
@@ -158,7 +195,7 @@ exports.handler = async function(event) {
           await answerCallback(cb.id, 'Rejected ❌');
           if (ADMIN_CHAT) {
             const adminFirst = (ADMIN_CHAT.indexOf(',')>-1) ? ADMIN_CHAT.split(',')[0].trim() : ADMIN_CHAT;
-            await sendTelegram(adminFirst, `Payment ${paymentId} rejected by @${cb.from.username || cb.from.id}`);
+            await sendTelegram(adminFirst, `Payment ${paymentId} rejected by @${cb.from && cb.from.username || cb.from && cb.from.id}`);
           }
 
           return { statusCode:200, body: 'ok' };
@@ -174,43 +211,39 @@ exports.handler = async function(event) {
       return { statusCode:200, body: 'ok' };
     }
 
-    // Handle regular messages and /start deep-link mapping
+    // MESSAGE /start handling
     if (body.message) {
       const msg = body.message;
       const chatId = msg.chat && (msg.chat.id || (msg.from && msg.from.id));
       const text = (msg.text || '').trim();
+      console.log('message received', { chatId, text });
 
-      // /start handling: payload may be OrderID or custom payload like JOIN:SPONSOR:POSITION:ORDER
+      // /start with payload mapping
       if (text && text.startsWith('/start')) {
         const parts = text.split(' ').filter(Boolean);
-        const payload = parts.slice(1).join(' ').trim(); // everything after /start
+        const payload = parts.slice(1).join(' ').trim();
         if (payload) {
-          // if payload looks like an OrderID -> map payment -> telegram chat
-          // try multiple possibilities
           try {
-            // if payload is simple ORDERID, map payments table
+            // try simple OrderID mapping
             const orderId = payload;
-            // find payment
             const payments = await supaFetch(`/rest/v1/payments?OrderID=eq.${encodeURIComponent(orderId)}&select=*`);
             const payment = Array.isArray(payments) && payments[0] ? payments[0] : null;
             if (payment) {
-              // patch payment.TelegramChatId
               await supaPatch(`/rest/v1/payments?id=eq.${payment.id}`, { TelegramChatId: String(chatId) });
               await sendTelegram(chatId, `✅ Order ${orderId} aapke Telegram account se link ho gaya. Hum aapko notify karein ge.`);
               return { statusCode:200, body: 'ok' };
             }
-            // fallback: user might send custom payload like JOIN:SPONSOR:POSITION:ORDER
+
+            // fallback: JOIN:sponsor:position:order style
             const pp = payload.split(':');
             if (pp[0] && pp[0].toUpperCase() === 'JOIN' && pp[1] && pp[2] && pp[3]) {
               const sponsorId = pp[1];
               const position = pp[2].toLowerCase();
               const orderRef = pp.slice(3).join(':');
-              // try to find pending member record for sponsor+position and map telegram_chat_id
               const mems = await supaFetch(`/rest/v1/members?sponsor_id=eq.${encodeURIComponent(sponsorId)}&position=eq.${encodeURIComponent(position)}&status=eq.pending&select=*`);
               const m = Array.isArray(mems) && mems[0] ? mems[0] : null;
               if (m) {
                 await supaPatch(`/rest/v1/members?id=eq.${m.id}`, { telegram_chat_id: String(chatId) });
-                // also optionally map payment with this orderRef
                 if (orderRef) {
                   const pms = await supaFetch(`/rest/v1/payments?OrderID=eq.${encodeURIComponent(orderRef)}&select=*`);
                   if (Array.isArray(pms) && pms[0]) {
@@ -221,7 +254,7 @@ exports.handler = async function(event) {
                 return { statusCode:200, body: 'ok' };
               }
             }
-            // if nothing matched:
+
             await sendTelegram(chatId, `Payload receive hua: ${payload}. Agar ye OrderID hai to ensure ki aapne site pe payment create kiya ho.`);
             return { statusCode:200, body: 'ok' };
           } catch (err) {
@@ -230,25 +263,27 @@ exports.handler = async function(event) {
             return { statusCode:500, body: 'error' };
           }
         } else {
-          // no payload, show welcome
+          // plain /start
           await sendTelegram(chatId, `Salam! Agar aap payment link ke saath aaye hain to /start <ORDERID> bhejein. Example: /start INV-2025-001`);
           return { statusCode:200, body: 'ok' };
         }
       }
 
-      // other commands (optional)
+      // help
       if (text && (text.toLowerCase() === '/help' || text.toLowerCase()==='help')) {
         await sendTelegram(chatId, `Commands:\n/start <ORDERID> — map your account\n/join — start join flow (coming soon)`);
         return { statusCode:200, body: 'ok' };
       }
 
-      // default: ignore or respond
+      // default: just ignore
       return { statusCode:200, body: 'ok' };
     }
 
+    // nothing to do
     return { statusCode:200, body: 'no action' };
   } catch (err) {
     console.error('telegram-webhook error', err);
-    return { statusCode:500, body: JSON.stringify({ ok:false, error: err.message }) };
+    // return 200 to avoid Telegram retry storms; but include error for netlify logs
+    return { statusCode:200, body: JSON.stringify({ ok:false, error: (err && err.message) || err }) };
   }
 };
