@@ -1,6 +1,6 @@
 [build]
   functions = "netlify/functions"
-  publish = "vhub1"
+  publish = "."
 
 [[redirects]]
   from = "/functions/*"
