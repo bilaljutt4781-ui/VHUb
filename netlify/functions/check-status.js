@@ -1,32 +1,21 @@
 // netlify/functions/check-status.js
 const fetch = require('node-fetch');
+const SUPA_URL = process.env.SUPABASE_URL;
+const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 exports.handler = async function(event) {
-  const headers = {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type"
-  };
   try {
-    const orderId = (event.queryStringParameters && event.queryStringParameters.orderId) || null;
-    if (!orderId) return { statusCode: 400, headers, body: JSON.stringify({ ok:false, message:'missing orderId' }) };
-
-    const base = process.env.AIRTABLE_BASE_ID;
-    const table = process.env.AIRTABLE_TABLE || process.env.AIRTABLE_TABLE_NAME || 'Payments';
-    const key = process.env.AIRTABLE_API_KEY;
-    if (!base || !table || !key) return { statusCode: 500, headers, body: JSON.stringify({ ok:false, message:'Airtable not configured' }) };
-
-    const filter = `({OrderID}='${orderId.replace(/'/g, "\\'")}')`;
-    const url = `https://api.airtable.com/v0/${base}/${encodeURIComponent(table)}?filterByFormula=${encodeURIComponent(filter)}&pageSize=1`;
-    const res = await fetch(url, { headers: { Authorization: 'Bearer ' + key } });
-    if (!res.ok) {
-      const txt = await res.text();
-      return { statusCode: 500, headers, body: JSON.stringify({ ok:false, message: 'airtable error', detail: txt }) };
-    }
-    const json = await res.json();
-    const record = (json.records && json.records[0]) || null;
-    return { statusCode: 200, headers, body: JSON.stringify({ ok:true, record }) };
+    if (event.httpMethod !== 'POST') return { statusCode:405, body: JSON.stringify({ ok:false, message:'Method not allowed' }) };
+    const { orderId } = JSON.parse(event.body || '{}');
+    if (!orderId) return { statusCode:400, body: JSON.stringify({ ok:false, message:'missing orderId' }) };
+    if (!SUPA_URL || !SUPA_KEY) return { statusCode:500, body: JSON.stringify({ ok:false, message:'supabase not configured' }) };
+    const url = `${SUPA_URL}/rest/v1/payments?OrderID=eq.${encodeURIComponent(orderId)}&select=*`;
+    const res = await fetch(url, { headers: { 'apikey': SUPA_KEY, 'Authorization': `Bearer ${SUPA_KEY}` } });
+    const arr = await res.json();
+    const rec = (Array.isArray(arr) && arr[0]) ? arr[0] : null;
+    return { statusCode:200, body: JSON.stringify({ ok:true, record: rec }) };
   } catch (err) {
-    return { statusCode: 500, headers, body: JSON.stringify({ ok:false, error: err.message }) };
+    console.error(err);
+    return { statusCode:500, body: JSON.stringify({ ok:false, error: err.message }) };
   }
 };

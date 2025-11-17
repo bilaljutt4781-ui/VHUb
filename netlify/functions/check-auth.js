@@ -1,5 +1,5 @@
 // netlify/functions/check-auth.js
-const jwt = require('jsonwebToken'); // your file uses jsonwebtoken
+const jwt = require('jsonwebtoken'); // your file uses jsonwebtoken
 exports.handler = async (event) => {
   const headers = event.headers || {};
   const auth = headers.authorization || headers.Authorization || '';

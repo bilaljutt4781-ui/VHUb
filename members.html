@@ -83,7 +83,7 @@
     if(chk.status !== 200){ alert('Session invalid'); return; }
 
     // load members list
-    const res = await fetch('/.netlify/functions/airtable-list-members');
+    const res = await fetch('/.netlify/functions/list-members');
     const j = await res.json();
     if(!j.ok){ alert('Error loading members'); return; }
     const members = j.members || [];
@@ -100,7 +100,7 @@
   document.getElementById('requestOtp').addEventListener('click', async () => {
     const username = document.getElementById('tgUser').value.trim();
     if(!username){ alert('Enter Telegram username'); return; }
-    const res = await fetch('/.netlify/functions/airtable-add-verify', {
+    const res = await fetch('/.netlify/functions/request-otp', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ telegram: username })
     });
     const j = await res.json();
@@ -113,7 +113,7 @@
     const username = document.getElementById('tgUser').value.trim();
     const otp = document.getElementById('otp').value.trim();
     if(!username||!otp){ alert('Enter username and otp'); return; }
-    const res = await fetch('/.netlify/functions/airtable-check-verify', {
+    const res = await fetch('/.netlify/functions/verify-otp', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ telegram: username, otp })
     });
     const j = await res.json();
