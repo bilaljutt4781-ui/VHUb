@@ -97,20 +97,19 @@
           <button id="createPaymentBtn" class="btn" type="submit">Create Payment</button>
           <div id="statusArea" class="status" style="display:none"></div>
         </div>
-        <p class="note">VHub members don’t just grow — they evolve into the next level of success.</p>
+        <p class="note"><code></code><code>VHub members don’t just grow — they evolve into the next level of success.</code>.</p>
       </form>
     </div>
   </div>
 
 <script>
-  // Generate order id: INV-YYYYMMDD-XXXX (safe characters only)
+  // Generate order id: INV-YYYYMMDD-XXXX (premium style)
   function genOrderId() {
     const d = new Date();
     const y = d.getFullYear();
     const m = String(d.getMonth()+1).padStart(2,'0');
     const day = String(d.getDate()).padStart(2,'0');
-    // Use only letters/numbers - no angle brackets
-    const rand = Math.random().toString(36).substr(2,6).toUpperCase().replace(/[^A-Z0-9]/g,'X');
+    const rand = Math.random().toString(36).substr(2,6).toUpperCase();
     return `INV-${y}${m}${day}-${rand}`;
   }
 
@@ -119,7 +118,6 @@
     const amountEl = document.getElementById('amount');
     const form = document.getElementById('createPaymentForm');
     const statusArea = document.getElementById('statusArea');
-    const btn = document.getElementById('createPaymentBtn');
 
     orderEl.value = genOrderId();
 
@@ -127,40 +125,33 @@
       e.preventDefault();
       statusArea.style.display = 'block';
       statusArea.innerHTML = '<span class="spinner"></span> Creating payment...';
-      btn.disabled = true;
 
       const payload = {
         orderId: orderEl.value,
-        amount: Number(amountEl.value) || 300,
+        amount: amountEl.value,
         gateway: document.getElementById('gateway').value,
         returnUrl: `${location.origin}/return.html`
       };
 
       try {
-        // NOTE: using /netlify/functions path to match your deploy
-        const res = await fetch('/netlify/functions/create-payment', {
+        const res = await fetch('/.netlify/functions/create-payment', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify(payload)
         });
         const j = await res.json();
 
-        if (j && (j.success || j.payment_url)) {
+        if (j.success && j.payment_url) {
           statusArea.innerHTML = 'Redirecting to payment provider...';
           // small pause for good UX
-          setTimeout(() => {
-            if (j.payment_url) location.href = j.payment_url;
-            else if (j.redirect) location.href = j.redirect;
-          }, 600);
+          setTimeout(() => location.href = j.payment_url, 600);
         } else {
           statusArea.innerHTML = 'Error creating payment — check console.';
-          console.error('create-payment response:', j);
-          btn.disabled = false;
+          console.error(j);
         }
       } catch(err) {
         statusArea.innerHTML = 'Network error — try again.';
-        console.error('create-payment error:', err);
-        btn.disabled = false;
+        console.error(err);
       }
     });
   });
